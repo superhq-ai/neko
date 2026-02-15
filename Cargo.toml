@@ -59,3 +59,7 @@ grep-searcher = "0.1"
 [dev-dependencies]
 tempfile = "3"
 tokio-test = "0.4"
+
+[profile.release]
+strip = true
+lto = "thin"
