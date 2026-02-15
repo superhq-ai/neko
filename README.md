@@ -94,6 +94,11 @@ neko memory search Q   Search memory files
 neko skills list       List installed skills
 neko skills install P  Install a skill from path
 neko skills remove N   Remove a skill by name
+neko cron list         List all cron jobs
+neko cron add <prompt> Add a scheduled job
+neko cron edit <id>    Edit a cron job
+neko cron remove <id>  Remove a cron job
+neko cron history      Show execution history
 ```
 
 ## Features
@@ -137,6 +142,31 @@ enabled = true
 bot_token = "${TELEGRAM_BOT_TOKEN}"
 allowed_users = [123456789]
 ```
+
+### Cron jobs
+
+Schedule recurring or one-shot tasks that the agent executes autonomously. Results are delivered back to the originating channel (Telegram, HTTP, etc.).
+
+```sh
+# Add a recurring job — every day at 9am
+neko cron add "summarize yesterday's news" --schedule "0 0 9 * * *" --name morning-digest
+
+# One-shot job
+neko cron add "remind me to call the dentist" --at "2026-02-17 09:00"
+
+# List jobs
+neko cron list
+
+# Announce results to a Telegram chat
+neko cron edit morning-digest --announce "telegram:123456"
+
+# View execution history
+neko cron history --lines 10
+```
+
+The agent can also create cron jobs itself via the `cron_manage` tool — when a user on Telegram says "remind me every morning at 9am", the agent creates the job and automatically routes results back to that chat. No manual wiring needed.
+
+Jobs are stored at `workspace/cron/jobs.json` and history at `workspace/cron/history.jsonl`. The scheduler ticks every 15 seconds with exponential backoff on failures (30s → 1m → 5m → 15m → 60m cap).
 
 ### Sandboxed Python
 
