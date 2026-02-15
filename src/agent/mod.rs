@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use tracing::{debug, info, warn};
 
+use crate::channels::Attachment;
 use crate::config::AgentConfig;
 use crate::error::{NekoError, Result};
 use crate::llm;
@@ -20,6 +21,8 @@ pub struct TurnResult {
     /// The last response ID — pass back on the next turn for seamless
     /// reasoning-item chaining via `previous_response_id`.
     pub last_response_id: Option<String>,
+    /// Files queued for sending as media attachments.
+    pub attachments: Vec<Attachment>,
 }
 
 pub struct Agent {
@@ -98,6 +101,8 @@ impl Agent {
 
         // Shared cwd — persists across iterations within a turn.
         let cwd = Arc::new(Mutex::new(self.workspace.clone()));
+        // Attachments queued by send_file tool calls across iterations.
+        let pending_attachments = Arc::new(Mutex::new(Vec::<Attachment>::new()));
 
         for iteration in 0..max_iterations {
             debug!("Agent loop iteration {iteration}");
@@ -157,11 +162,13 @@ impl Agent {
                 strip_reasoning(&mut history);
                 trim_history(&mut history, self.config.max_history as usize);
                 self.log_to_recall(user_message, &text);
+                let attachments = std::mem::take(&mut *pending_attachments.lock().unwrap());
                 return Ok(TurnResult {
                     text,
                     history,
                     usage: last_usage,
                     last_response_id: current_prev_id,
+                    attachments,
                 });
             }
 
@@ -172,6 +179,7 @@ impl Agent {
             let tool_ctx = ToolContext {
                 workspace: self.workspace.clone(),
                 cwd: Arc::clone(&cwd),
+                pending_attachments: Arc::clone(&pending_attachments),
             };
 
             let calls: Vec<(String, String, String)> = function_calls

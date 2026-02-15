@@ -4,8 +4,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use teloxide::net::default_reqwest_settings;
 use teloxide::payloads::GetUpdatesSetters;
+use teloxide::payloads::{SendAudioSetters, SendDocumentSetters, SendPhotoSetters, SendVideoSetters};
 use teloxide::requests::Requester;
-use teloxide::types::{ChatId, ChatKind, UpdateKind};
+use teloxide::types::{ChatId, ChatKind, InputFile, UpdateKind};
 use teloxide::Bot;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -72,11 +73,44 @@ impl Channel for TelegramChannel {
                     }
                 };
 
-                if let Err(e) = send_bot
-                    .send_message(ChatId(chat_id), &msg.text)
-                    .await
-                {
-                    error!("Failed to send Telegram message: {e}");
+                let cid = ChatId(chat_id);
+
+                if msg.attachments.is_empty() {
+                    // Text-only message
+                    if let Err(e) = send_bot.send_message(cid, &msg.text).await {
+                        error!("Failed to send Telegram message: {e}");
+                    }
+                    continue;
+                }
+
+                // Has attachments — decide caption strategy.
+                // Telegram captions are limited to 1024 chars.
+                let text = msg.text.trim();
+                let text_fits_caption = text.len() <= 1024;
+
+                // If text is too long for a caption, send it as a separate message first.
+                if !text.is_empty() && !text_fits_caption {
+                    if let Err(e) = send_bot.send_message(cid, text).await {
+                        error!("Failed to send Telegram text message: {e}");
+                    }
+                }
+
+                for (i, attachment) in msg.attachments.iter().enumerate() {
+                    // First attachment gets caption if text fits
+                    let caption = if i == 0 && !text.is_empty() && text_fits_caption {
+                        Some(text)
+                    } else {
+                        None
+                    };
+
+                    let input_file = InputFile::file(&attachment.path);
+                    let result = send_media(&send_bot, cid, input_file, &attachment.mime_type, caption).await;
+                    if let Err(e) = result {
+                        error!(
+                            "Failed to send Telegram media {}: {e}",
+                            attachment.path.display()
+                        );
+                    }
                 }
             }
         });
@@ -161,4 +195,40 @@ impl Channel for TelegramChannel {
         info!("Telegram channel stopped");
         Ok(())
     }
+}
+
+/// Dispatch a media file via the appropriate Telegram API based on MIME type.
+async fn send_media(
+    bot: &Bot,
+    chat_id: ChatId,
+    file: InputFile,
+    mime_type: &str,
+    caption: Option<&str>,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if mime_type.starts_with("image/") {
+        let mut req = bot.send_photo(chat_id, file);
+        if let Some(c) = caption {
+            req = req.caption(c);
+        }
+        req.await?;
+    } else if mime_type.starts_with("audio/") {
+        let mut req = bot.send_audio(chat_id, file);
+        if let Some(c) = caption {
+            req = req.caption(c);
+        }
+        req.await?;
+    } else if mime_type.starts_with("video/") {
+        let mut req = bot.send_video(chat_id, file);
+        if let Some(c) = caption {
+            req = req.caption(c);
+        }
+        req.await?;
+    } else {
+        let mut req = bot.send_document(chat_id, file);
+        if let Some(c) = caption {
+            req = req.caption(c);
+        }
+        req.await?;
+    }
+    Ok(())
 }

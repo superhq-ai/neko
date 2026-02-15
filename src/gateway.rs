@@ -54,6 +54,7 @@ impl Gateway {
                 channel: inbound.channel,
                 recipient_id: inbound.reply_to,
                 text: "Session reset. Starting fresh.".to_string(),
+                attachments: Vec::new(),
             });
         }
 
@@ -85,6 +86,7 @@ impl Gateway {
             channel: inbound.channel,
             recipient_id: inbound.reply_to,
             text: result.text,
+            attachments: result.attachments,
         })
     }
 

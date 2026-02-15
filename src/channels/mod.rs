@@ -5,6 +5,13 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 
+/// A file attachment to send through a channel.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub path: std::path::PathBuf,
+    pub mime_type: String,
+}
+
 /// An inbound message from any channel.
 pub struct InboundMessage {
     pub channel: String,
@@ -22,6 +29,7 @@ pub struct OutboundMessage {
     pub channel: String,
     pub recipient_id: String,
     pub text: String,
+    pub attachments: Vec<Attachment>,
 }
 
 /// Trait for external channel integrations.

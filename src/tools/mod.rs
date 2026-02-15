@@ -10,6 +10,7 @@ pub mod memory_replace;
 pub mod run_python;
 pub mod process_manager;
 pub mod process;
+pub mod send_file;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,6 +21,7 @@ use serde_json::json;
 
 use self::process_manager::ProcessManager;
 
+use crate::channels::Attachment;
 use crate::config::ToolsConfig;
 use crate::error::Result;
 use crate::llm::types::ToolDefinition;
@@ -31,6 +33,8 @@ pub struct ToolContext {
     /// Current working directory — mutable, shared across tool calls.
     /// Relative paths in file/exec tools resolve against this.
     pub cwd: Arc<Mutex<PathBuf>>,
+    /// Files queued for sending as media attachments.
+    pub pending_attachments: Arc<Mutex<Vec<Attachment>>>,
 }
 
 /// Result of a tool execution
@@ -122,6 +126,8 @@ pub fn register_core_tools(
     registry.register(Box::new(memory_flush::MemoryFlushTool));
     registry.register(Box::new(memory_search::MemorySearchTool));
     registry.register(Box::new(memory_replace::MemoryReplaceTool));
+
+    registry.register(Box::new(send_file::SendFileTool));
 
     if config.python.enabled {
         registry.register(Box::new(run_python::RunPythonTool::new(
