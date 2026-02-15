@@ -23,6 +23,9 @@ pub enum NekoError {
     #[error("Channel error: {0}")]
     Channel(String),
 
+    #[error("Cron error: {0}")]
+    Cron(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

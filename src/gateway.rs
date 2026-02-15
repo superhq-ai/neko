@@ -7,6 +7,7 @@ use crate::channels::{InboundMessage, OutboundMessage};
 use crate::config::Config;
 use crate::error::Result;
 use crate::session::SessionStore;
+use crate::tools::ChannelContext;
 
 pub struct Gateway {
     pub agent: Arc<Agent>,
@@ -67,9 +68,14 @@ impl Gateway {
         let (history, prev_response_id) =
             self.session_store.get_history(&session_id).await?;
 
+        let channel_ctx = ChannelContext {
+            channel: inbound.channel.clone(),
+            recipient_id: inbound.reply_to.clone(),
+        };
+
         let result = self
             .agent
-            .run_turn_with_history(history, &text, prev_response_id)
+            .run_turn_with_history(history, &text, prev_response_id, Some(channel_ctx))
             .await?;
 
         // Persist updated history + new response ID
@@ -101,7 +107,7 @@ impl Gateway {
 
         let result = self
             .agent
-            .run_turn_with_history(history, text, prev_response_id)
+            .run_turn_with_history(history, text, prev_response_id, None)
             .await?;
 
         self.session_store
@@ -142,9 +148,14 @@ impl Gateway {
         let (history, prev_response_id) =
             self.session_store.get_history(&sid).await?;
 
+        let channel_ctx = ChannelContext {
+            channel: "http".to_string(),
+            recipient_id: sender_id.unwrap_or("http-default").to_string(),
+        };
+
         let result = self
             .agent
-            .run_turn_with_history(history, text, prev_response_id)
+            .run_turn_with_history(history, text, prev_response_id, Some(channel_ctx))
             .await?;
 
         self.session_store

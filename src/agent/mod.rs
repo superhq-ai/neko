@@ -10,7 +10,7 @@ use crate::channels::Attachment;
 use crate::config::AgentConfig;
 use crate::error::{NekoError, Result};
 use crate::llm;
-use crate::tools::{ToolContext, ToolRegistry};
+use crate::tools::{ChannelContext, ToolContext, ToolRegistry};
 use crate::skills::Skill;
 
 /// Return value from a completed agent turn.
@@ -59,10 +59,10 @@ impl Agent {
     }
 
     /// Backward-compatible single-shot turn (no session, ephemeral history).
-    /// Used by `neko message`.
+    /// Used by `neko message` and the cron scheduler.
     pub async fn run_turn(&self, user_message: &str) -> Result<String> {
         let result = self
-            .run_turn_with_history(Vec::new(), user_message, None)
+            .run_turn_with_history(Vec::new(), user_message, None, None)
             .await?;
         Ok(result.text)
     }
@@ -81,6 +81,7 @@ impl Agent {
         mut history: Vec<llm::Item>,
         user_message: &str,
         previous_response_id: Option<String>,
+        channel_context: Option<ChannelContext>,
     ) -> Result<TurnResult> {
         let user_item = llm::Item::Message {
             role: llm::Role::User,
@@ -180,6 +181,7 @@ impl Agent {
                 workspace: self.workspace.clone(),
                 cwd: Arc::clone(&cwd),
                 pending_attachments: Arc::clone(&pending_attachments),
+                channel: channel_context.clone(),
             };
 
             let calls: Vec<(String, String, String)> = function_calls

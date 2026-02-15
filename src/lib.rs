@@ -8,4 +8,5 @@ pub mod skills;
 pub mod mcp;
 pub mod session;
 pub mod channels;
+pub mod cron;
 pub mod gateway;

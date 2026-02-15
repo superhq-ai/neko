@@ -11,6 +11,7 @@ pub mod run_python;
 pub mod process_manager;
 pub mod process;
 pub mod send_file;
+pub mod cron_manage;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -26,6 +27,13 @@ use crate::config::ToolsConfig;
 use crate::error::Result;
 use crate::llm::types::ToolDefinition;
 
+/// The channel + chat ID the current message arrived from.
+#[derive(Debug, Clone)]
+pub struct ChannelContext {
+    pub channel: String,
+    pub recipient_id: String,
+}
+
 /// Context passed to tool execution.
 pub struct ToolContext {
     /// Root workspace directory — security boundary (immutable).
@@ -35,6 +43,8 @@ pub struct ToolContext {
     pub cwd: Arc<Mutex<PathBuf>>,
     /// Files queued for sending as media attachments.
     pub pending_attachments: Arc<Mutex<Vec<Attachment>>>,
+    /// The channel this message arrived from (if any).
+    pub channel: Option<ChannelContext>,
 }
 
 /// Result of a tool execution
@@ -128,6 +138,7 @@ pub fn register_core_tools(
     registry.register(Box::new(memory_replace::MemoryReplaceTool));
 
     registry.register(Box::new(send_file::SendFileTool));
+    registry.register(Box::new(cron_manage::CronManageTool));
 
     if config.python.enabled {
         registry.register(Box::new(run_python::RunPythonTool::new(

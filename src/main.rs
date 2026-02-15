@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use tokio::sync::mpsc;
 use tracing::info;
@@ -66,6 +67,11 @@ enum Commands {
         #[command(subcommand)]
         action: SkillAction,
     },
+    /// Cron job management
+    Cron {
+        #[command(subcommand)]
+        action: CronAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -113,6 +119,63 @@ enum SkillAction {
     Reload,
 }
 
+#[derive(Subcommand)]
+enum CronAction {
+    /// List all cron jobs
+    List,
+    /// Add a new cron job
+    Add {
+        /// The prompt to send to the agent
+        prompt: String,
+        /// Cron expression (e.g. "0 0 9 * * *" for daily at 9am)
+        #[arg(short, long)]
+        schedule: Option<String>,
+        /// One-shot datetime (e.g. "2026-02-17 09:00")
+        #[arg(long)]
+        at: Option<String>,
+        /// Human-readable name for the job
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Announce results to a channel (e.g. "telegram:123456")
+        #[arg(long)]
+        announce: Option<String>,
+        /// Keep one-shot jobs after execution
+        #[arg(long)]
+        keep_after_run: bool,
+    },
+    /// Edit an existing cron job
+    Edit {
+        /// Job ID or name
+        id: String,
+        /// Update the prompt
+        #[arg(short, long)]
+        prompt: Option<String>,
+        /// Update the cron schedule
+        #[arg(short, long)]
+        schedule: Option<String>,
+        /// Update the name
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Enable or disable the job
+        #[arg(short, long)]
+        enabled: Option<bool>,
+        /// Set announce target (e.g. "telegram:123456"), or "none" to clear
+        #[arg(long)]
+        announce: Option<String>,
+    },
+    /// Remove a cron job
+    Remove {
+        /// Job ID or name
+        id: String,
+    },
+    /// Show execution history
+    History {
+        /// Number of entries to show
+        #[arg(short, long, default_value = "20")]
+        lines: usize,
+    },
+}
+
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -158,6 +221,27 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             SkillAction::Install { path } => cmd_skills_install(&cli.config, &path)?,
             SkillAction::Remove { name } => cmd_skills_remove(&cli.config, &name)?,
             SkillAction::Reload => cmd_skills_list(&cli.config)?,
+        },
+        Commands::Cron { action } => match action {
+            CronAction::List => cmd_cron_list(&cli.config)?,
+            CronAction::Add {
+                prompt,
+                schedule,
+                at,
+                name,
+                announce,
+                keep_after_run,
+            } => cmd_cron_add(&cli.config, &prompt, schedule, at, name, announce, keep_after_run)?,
+            CronAction::Edit {
+                id,
+                prompt,
+                schedule,
+                name,
+                enabled,
+                announce,
+            } => cmd_cron_edit(&cli.config, &id, prompt, schedule, name, enabled, announce)?,
+            CronAction::Remove { id } => cmd_cron_remove(&cli.config, &id)?,
+            CronAction::History { lines } => cmd_cron_history(&cli.config, lines)?,
         },
     }
 
@@ -478,10 +562,12 @@ interval_secs = 3600
     let memory_dir = ws.join("memory");
     let sessions_dir = ws.join("sessions");
     let skills_dir = ws.join("skills");
+    let cron_dir = ws.join("cron");
 
     std::fs::create_dir_all(&memory_dir)?;
     std::fs::create_dir_all(&sessions_dir)?;
     std::fs::create_dir_all(&skills_dir)?;
+    std::fs::create_dir_all(&cron_dir)?;
 
     if config_path.exists() {
         let overwrite = Confirm::new("Config already exists. Overwrite?")
@@ -518,10 +604,12 @@ fn cmd_init() -> Result<()> {
     let memory_dir = workspace.join("memory");
     let sessions_dir = workspace.join("sessions");
     let skills_dir = workspace.join("skills");
+    let cron_dir = workspace.join("cron");
 
     std::fs::create_dir_all(&memory_dir)?;
     std::fs::create_dir_all(&sessions_dir)?;
     std::fs::create_dir_all(&skills_dir)?;
+    std::fs::create_dir_all(&cron_dir)?;
 
     if !config_path.exists() {
         std::fs::write(&config_path, Config::default_toml())?;
@@ -583,12 +671,20 @@ async fn cmd_start(config_path: &Option<PathBuf>) -> Result<()> {
         config_arc.clone(),
     ));
 
+    // Outbound channel — shared between Telegram and cron scheduler.
+    // Created unconditionally so the cron scheduler can always announce.
+    let (outbound_tx, outbound_rx) = mpsc::channel::<neko::channels::OutboundMessage>(64);
+    let mut cron_outbound_tx: Option<mpsc::Sender<neko::channels::OutboundMessage>> = None;
+
     // Start Telegram channel if configured
     if let Some(ref tg_config) = config.channels.telegram {
         if tg_config.enabled {
             let tg_channel = neko::channels::telegram::TelegramChannel::new(tg_config.clone())?;
             let (inbound_tx, mut inbound_rx) = mpsc::channel::<neko::channels::InboundMessage>(64);
-            let (outbound_tx, outbound_rx) = mpsc::channel::<neko::channels::OutboundMessage>(64);
+
+            // Clone outbound_tx for the message handler before moving outbound_rx
+            let outbound_tx_handler = outbound_tx.clone();
+            cron_outbound_tx = Some(outbound_tx.clone());
 
             // Spawn Telegram polling loop
             tokio::spawn(async move {
@@ -602,7 +698,7 @@ async fn cmd_start(config_path: &Option<PathBuf>) -> Result<()> {
             tokio::spawn(async move {
                 while let Some(inbound) = inbound_rx.recv().await {
                     let gw = gw.clone();
-                    let tx = outbound_tx.clone();
+                    let tx = outbound_tx_handler.clone();
                     tokio::spawn(async move {
                         match gw.handle_message(inbound).await {
                             Ok(outbound) => {
@@ -621,6 +717,14 @@ async fn cmd_start(config_path: &Option<PathBuf>) -> Result<()> {
             info!("Telegram channel started");
         }
     }
+
+    // Start cron scheduler
+    let cron_jobs = neko::cron::load_jobs(&workspace).unwrap_or_default();
+    neko::cron::spawn_scheduler(
+        gateway.agent.clone(),
+        workspace.clone(),
+        cron_outbound_tx,
+    );
 
     // Build HTTP server
     let state = Arc::new(neko::api::AppState {
@@ -656,6 +760,10 @@ async fn cmd_start(config_path: &Option<PathBuf>) -> Result<()> {
     println!("  Log:       {}", log_file_path().display());
     if config.channels.telegram.as_ref().map_or(false, |t| t.enabled) {
         println!("  Telegram:  enabled");
+    }
+    if !cron_jobs.is_empty() {
+        let enabled = cron_jobs.iter().filter(|j| j.enabled).count();
+        println!("  Cron:      {} jobs ({} enabled)", cron_jobs.len(), enabled);
     }
     println!();
     println!("Press Ctrl+C to stop.");
@@ -1000,4 +1108,230 @@ fn cmd_skills_remove(config_path: &Option<PathBuf>, name: &str) -> Result<()> {
     std::fs::remove_dir_all(&skill.path)?;
     println!("Removed skill '{name}'.");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Cron commands
+// ---------------------------------------------------------------------------
+
+fn cmd_cron_list(config_path: &Option<PathBuf>) -> Result<()> {
+    let config = load_config(config_path)?;
+    let jobs = neko::cron::load_jobs(&config.workspace_path())?;
+
+    if jobs.is_empty() {
+        println!("No cron jobs configured.");
+        return Ok(());
+    }
+
+    for job in &jobs {
+        let name = job.name.as_deref().unwrap_or("-");
+        let status = if job.enabled { "enabled" } else { "disabled" };
+        let schedule = match &job.schedule {
+            neko::cron::Schedule::Cron { expr } => format!("cron: {expr}"),
+            neko::cron::Schedule::At { datetime } => {
+                format!("at: {}", datetime.format("%Y-%m-%d %H:%M"))
+            }
+        };
+        let announce = job
+            .announce
+            .as_ref()
+            .map(|a| format!("{}:{}", a.channel, a.recipient_id))
+            .unwrap_or_else(|| "-".into());
+        let last = job
+            .last_run_at
+            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "never".into());
+        let failures = job.retry.consecutive_failures;
+
+        println!(
+            "{}\t{}\t{}\t{}\tannounce={}\tlast={}\tfailures={}",
+            job.id, name, status, schedule, announce, last, failures
+        );
+    }
+
+    Ok(())
+}
+
+fn cmd_cron_add(
+    config_path: &Option<PathBuf>,
+    prompt: &str,
+    schedule: Option<String>,
+    at: Option<String>,
+    name: Option<String>,
+    announce: Option<String>,
+    keep_after_run: bool,
+) -> Result<()> {
+    let config = load_config(config_path)?;
+    let workspace = config.workspace_path();
+
+    let sched = match (schedule, at) {
+        (Some(expr), None) => {
+            neko::cron::validate_cron_expr(&expr)?;
+            neko::cron::Schedule::Cron { expr }
+        }
+        (None, Some(dt_str)) => {
+            let datetime = parse_datetime(&dt_str)?;
+            neko::cron::Schedule::At { datetime }
+        }
+        (Some(_), Some(_)) => {
+            return Err(NekoError::Cron(
+                "specify either --schedule or --at, not both".into(),
+            ));
+        }
+        (None, None) => {
+            return Err(NekoError::Cron(
+                "must specify --schedule or --at".into(),
+            ));
+        }
+    };
+
+    let announce_target = announce.map(|s| neko::cron::parse_announce(&s)).transpose()?;
+
+    let job = neko::cron::CronJob {
+        id: neko::cron::new_job_id(),
+        name,
+        prompt: prompt.to_string(),
+        schedule: sched,
+        announce: announce_target,
+        enabled: true,
+        keep_after_run,
+        created_at: Utc::now(),
+        last_run_at: None,
+        retry: neko::cron::RetryState::default(),
+    };
+
+    let mut jobs = neko::cron::load_jobs(&workspace)?;
+    let label = job.name.as_deref().unwrap_or(&job.id).to_string();
+    jobs.push(job);
+    neko::cron::save_jobs(&workspace, &jobs)?;
+
+    println!("Created cron job: {label}");
+    Ok(())
+}
+
+fn cmd_cron_edit(
+    config_path: &Option<PathBuf>,
+    id_or_name: &str,
+    prompt: Option<String>,
+    schedule: Option<String>,
+    name: Option<String>,
+    enabled: Option<bool>,
+    announce: Option<String>,
+) -> Result<()> {
+    let config = load_config(config_path)?;
+    let workspace = config.workspace_path();
+    let mut jobs = neko::cron::load_jobs(&workspace)?;
+
+    let idx = neko::cron::find_job(&jobs, id_or_name)
+        .ok_or_else(|| NekoError::Cron(format!("job '{id_or_name}' not found")))?;
+
+    if let Some(p) = prompt {
+        jobs[idx].prompt = p;
+    }
+    if let Some(expr) = schedule {
+        neko::cron::validate_cron_expr(&expr)?;
+        jobs[idx].schedule = neko::cron::Schedule::Cron { expr };
+    }
+    if let Some(n) = name {
+        jobs[idx].name = Some(n);
+    }
+    if let Some(e) = enabled {
+        jobs[idx].enabled = e;
+        // Reset retry state when re-enabling
+        if e {
+            jobs[idx].retry = neko::cron::RetryState::default();
+        }
+    }
+    if let Some(a) = announce {
+        if a == "none" {
+            jobs[idx].announce = None;
+        } else {
+            jobs[idx].announce = Some(neko::cron::parse_announce(&a)?);
+        }
+    }
+
+    neko::cron::save_jobs(&workspace, &jobs)?;
+    println!("Updated job: {}", jobs[idx].name.as_deref().unwrap_or(&jobs[idx].id));
+    Ok(())
+}
+
+fn cmd_cron_remove(config_path: &Option<PathBuf>, id_or_name: &str) -> Result<()> {
+    let config = load_config(config_path)?;
+    let workspace = config.workspace_path();
+    let mut jobs = neko::cron::load_jobs(&workspace)?;
+
+    let idx = neko::cron::find_job(&jobs, id_or_name)
+        .ok_or_else(|| NekoError::Cron(format!("job '{id_or_name}' not found")))?;
+
+    let removed = jobs.remove(idx);
+    neko::cron::save_jobs(&workspace, &jobs)?;
+
+    let label = removed.name.as_deref().unwrap_or(&removed.id);
+    println!("Removed job: {label}");
+    Ok(())
+}
+
+fn cmd_cron_history(config_path: &Option<PathBuf>, lines: usize) -> Result<()> {
+    let config = load_config(config_path)?;
+    let entries = neko::cron::read_history(&config.workspace_path(), lines)?;
+
+    if entries.is_empty() {
+        println!("No execution history.");
+        return Ok(());
+    }
+
+    for entry in &entries {
+        let name = entry.job_name.as_deref().unwrap_or(&entry.job_id);
+        let status = if entry.success { "OK" } else { "FAIL" };
+        let duration = (entry.finished_at - entry.started_at).num_milliseconds() as f64 / 1000.0;
+        let detail = if entry.success {
+            entry
+                .response
+                .as_deref()
+                .map(|r| {
+                    let first_line = r.lines().next().unwrap_or(r);
+                    if first_line.len() > 80 {
+                        format!("{}...", &first_line[..80])
+                    } else {
+                        first_line.to_string()
+                    }
+                })
+                .unwrap_or_default()
+        } else {
+            entry.error.as_deref().unwrap_or("unknown error").to_string()
+        };
+
+        println!(
+            "{}\t{}\t{}\t{:.1}s\t{}",
+            entry.started_at.format("%Y-%m-%d %H:%M:%S"),
+            name,
+            status,
+            duration,
+            detail,
+        );
+    }
+
+    Ok(())
+}
+
+fn parse_datetime(s: &str) -> Result<DateTime<Utc>> {
+    // Try "YYYY-MM-DD HH:MM" (local time assumed)
+    let formats = ["%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"];
+    for fmt in &formats {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
+            let local = chrono::Local::now().timezone();
+            let local_dt = naive
+                .and_local_timezone(local)
+                .single()
+                .ok_or_else(|| NekoError::Cron(format!("ambiguous datetime: {s}")))?;
+            return Ok(local_dt.with_timezone(&Utc));
+        }
+    }
+    // Try RFC 3339
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    Err(NekoError::Cron(format!(
+        "could not parse datetime: '{s}' (expected YYYY-MM-DD HH:MM)"
+    )))
 }
