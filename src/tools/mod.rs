@@ -1,0 +1,120 @@
+pub mod read_file;
+pub mod write_file;
+pub mod list_files;
+pub mod exec;
+pub mod http_request;
+pub mod memory_flush;
+pub mod memory_search;
+pub mod memory_replace;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use async_trait::async_trait;
+use serde_json::json;
+
+use crate::config::ToolsConfig;
+use crate::error::Result;
+use crate::llm::types::ToolDefinition;
+
+/// Context passed to tool execution.
+pub struct ToolContext {
+    pub workspace: PathBuf,
+}
+
+/// Result of a tool execution
+#[derive(Debug, Clone)]
+pub struct ToolResult {
+    pub output: String,
+    pub is_error: bool,
+}
+
+impl ToolResult {
+    pub fn success(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            is_error: false,
+        }
+    }
+    pub fn error(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            is_error: true,
+        }
+    }
+}
+
+#[async_trait]
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    fn parameters_schema(&self) -> serde_json::Value;
+    async fn execute(&self, params: serde_json::Value, ctx: &ToolContext) -> Result<ToolResult>;
+}
+
+pub struct ToolRegistry {
+    tools: HashMap<String, Box<dyn Tool>>,
+}
+
+impl ToolRegistry {
+    pub fn new() -> Self {
+        Self {
+            tools: HashMap::new(),
+        }
+    }
+
+    pub fn register(&mut self, tool: Box<dyn Tool>) {
+        self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    pub fn get(&self, name: &str) -> Option<&dyn Tool> {
+        self.tools.get(name).map(|t| t.as_ref())
+    }
+
+    pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.tools
+            .values()
+            .map(|t| ToolDefinition {
+                tool_type: "function".to_string(),
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                parameters: t.parameters_schema(),
+            })
+            .collect()
+    }
+
+    pub fn names(&self) -> Vec<&str> {
+        self.tools.keys().map(|s| s.as_str()).collect()
+    }
+}
+
+/// Register core tools, respecting the config's enabled tools list.
+pub fn register_core_tools(
+    registry: &mut ToolRegistry,
+    config: &ToolsConfig,
+    workspace: &PathBuf,
+) {
+    registry.register(Box::new(read_file::ReadFileTool::new(workspace.clone())));
+    registry.register(Box::new(write_file::WriteFileTool::new(workspace.clone())));
+    registry.register(Box::new(list_files::ListFilesTool::new(workspace.clone())));
+    registry.register(Box::new(exec::ExecTool::new(
+        config.exec_allowlist.clone(),
+        config.exec_timeout_secs,
+        workspace.clone(),
+    )));
+    registry.register(Box::new(http_request::HttpRequestTool::new(
+        config.http_allowed_domains.clone(),
+    )));
+    registry.register(Box::new(memory_flush::MemoryFlushTool));
+    registry.register(Box::new(memory_search::MemorySearchTool));
+    registry.register(Box::new(memory_replace::MemoryReplaceTool));
+}
+
+/// Helper to build a JSON Schema object with given properties.
+pub fn schema_object(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    })
+}

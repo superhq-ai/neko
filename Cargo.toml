@@ -1,0 +1,55 @@
+[package]
+name = "neko"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight AI agent runtime"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Config
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+
+# HTTP client (LLM)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest-eventsource = "0.6"
+
+# HTTP server
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async traits
+async-trait = "0.1"
+
+# MCP (Model Context Protocol)
+rmcp = { version = "0.15", features = ["client", "transport-child-process"] }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.11", features = ["v4"] }
+url = "2"
+futures = "0.3"
+regex = "1"
+dirs = "6"
+serde_yaml = "0.9"
+walkdir = "2"
+inquire = "0.7"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
