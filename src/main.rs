@@ -392,10 +392,48 @@ fn cmd_init_interactive() -> Result<()> {
         .prompt()
         .map_err(|e| NekoError::Config(format!("Prompt cancelled: {e}")))?;
 
+    let enable_telegram = Confirm::new("Enable Telegram bot?")
+        .with_default(false)
+        .prompt()
+        .map_err(|e| NekoError::Config(format!("Prompt cancelled: {e}")))?;
+
+    let (telegram_token, telegram_users) = if enable_telegram {
+        let token = Text::new("Telegram bot token:")
+            .with_default("${TELEGRAM_BOT_TOKEN}")
+            .with_help_message("Use ${VAR_NAME} to reference an env variable")
+            .prompt()
+            .map_err(|e| NekoError::Config(format!("Prompt cancelled: {e}")))?;
+
+        let users = Text::new("Allowed Telegram user IDs (comma-separated):")
+            .with_default("")
+            .with_help_message("Leave empty to allow all users")
+            .prompt()
+            .map_err(|e| NekoError::Config(format!("Prompt cancelled: {e}")))?;
+
+        (Some(token), users)
+    } else {
+        (None, String::new())
+    };
+
     // Build config TOML
     let api_key_line = match &api_key_str {
         Some(k) => format!("api_key = \"{k}\""),
         None => "# api_key = \"\"".to_string(),
+    };
+
+    let telegram_section = match &telegram_token {
+        Some(token) => {
+            let users_array = if telegram_users.trim().is_empty() {
+                "[]".to_string()
+            } else {
+                let ids: Vec<&str> = telegram_users.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                format!("[{}]", ids.join(", "))
+            };
+            format!(
+                "[channels.telegram]\nenabled = true\nbot_token = \"{token}\"\nallowed_users = {users_array}\n"
+            )
+        }
+        None => "# [channels.telegram]\n# enabled = true\n# bot_token = \"${TELEGRAM_BOT_TOKEN}\"\n# allowed_users = []\n".to_string(),
     };
 
     let config_content = format!(
@@ -423,6 +461,7 @@ exec_yield_ms = 10000
 enabled = {enable_heartbeat}
 interval_secs = 3600
 
+{telegram_section}
 # MCP servers — uncomment to enable
 # [mcp.filesystem]
 # command = "npx"
