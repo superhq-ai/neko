@@ -416,7 +416,8 @@ models = ["{model}"]
 
 [tools]
 sandbox = false
-exec_timeout_secs = 30
+exec_timeout_secs = 1800
+exec_yield_ms = 10000
 
 [heartbeat]
 enabled = {enable_heartbeat}

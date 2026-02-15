@@ -149,6 +149,7 @@ pub fn load_skills(workspace: &Path) -> Result<Vec<Skill>> {
     let mut skills = Vec::new();
 
     for entry in walkdir::WalkDir::new(&skills_dir)
+        .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
     {

@@ -1,22 +1,28 @@
-use std::time::Duration;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
-use tokio::process::Command;
 
+use super::process_manager::{ProcessManager, SpawnResult};
 use super::{schema_object, Tool, ToolContext, ToolResult};
 use crate::error::Result;
 
 pub struct ExecTool {
     allowlist: Vec<String>,
     timeout_secs: u64,
+    process_manager: Arc<ProcessManager>,
 }
 
 impl ExecTool {
-    pub fn new(allowlist: Vec<String>, timeout_secs: u64) -> Self {
+    pub fn new(
+        allowlist: Vec<String>,
+        timeout_secs: u64,
+        process_manager: Arc<ProcessManager>,
+    ) -> Self {
         Self {
             allowlist,
             timeout_secs,
+            process_manager,
         }
     }
 }
@@ -28,7 +34,9 @@ impl Tool for ExecTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command in the current directory. Returns stdout and stderr."
+        "Execute a shell command. Short commands return immediately. \
+         Long-running commands are automatically backgrounded and return a \
+         session_id — use the `process` tool to poll output, send input, or kill them."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -37,6 +45,10 @@ impl Tool for ExecTool {
                 "command": {
                     "type": "string",
                     "description": "Shell command to execute"
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Optional per-command timeout in seconds (overrides default)"
                 }
             }),
             &["command"],
@@ -56,47 +68,32 @@ impl Tool for ExecTool {
             }
         }
 
+        let timeout = params["timeout"]
+            .as_u64()
+            .unwrap_or(self.timeout_secs);
+
         let cwd = ctx.cwd.lock().unwrap().clone();
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(self.timeout_secs),
-            Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .current_dir(&cwd)
-                .output(),
-        )
-        .await;
-
-        match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let mut result = String::new();
-                if !stdout.is_empty() {
-                    result.push_str(&stdout);
-                }
-                if !stderr.is_empty() {
-                    if !result.is_empty() {
-                        result.push('\n');
-                    }
-                    result.push_str("[stderr] ");
-                    result.push_str(&stderr);
-                }
-                if result.is_empty() {
-                    result = format!("Command exited with code {}", output.status.code().unwrap_or(-1));
-                }
-                if output.status.success() {
-                    Ok(ToolResult::success(result))
+        match self.process_manager.spawn_or_yield(command, &cwd, timeout).await {
+            Ok(SpawnResult::Completed { output, success }) => {
+                if success {
+                    Ok(ToolResult::success(output))
                 } else {
-                    Ok(ToolResult::error(result))
+                    Ok(ToolResult::error(output))
                 }
             }
-            Ok(Err(e)) => Ok(ToolResult::error(format!("Failed to execute: {e}"))),
-            Err(_) => Ok(ToolResult::error(format!(
-                "Command timed out after {}s",
-                self.timeout_secs
-            ))),
+            Ok(SpawnResult::Backgrounded { session_id, output_so_far }) => {
+                let mut msg = format!(
+                    "Command backgrounded as {session_id} (still running).\n\
+                     Use `process` tool with action \"poll\" to check output."
+                );
+                if !output_so_far.is_empty() {
+                    msg.push_str("\n\nOutput so far:\n");
+                    msg.push_str(&output_so_far);
+                }
+                Ok(ToolResult::success(msg))
+            }
+            Err(e) => Ok(ToolResult::error(e)),
         }
     }
 }

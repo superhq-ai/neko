@@ -7,6 +7,9 @@ pub mod memory_flush;
 pub mod memory_search;
 pub mod cd;
 pub mod memory_replace;
+pub mod run_python;
+pub mod process_manager;
+pub mod process;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,6 +17,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
+
+use self::process_manager::ProcessManager;
 
 use crate::config::ToolsConfig;
 use crate::error::Result;
@@ -99,13 +104,17 @@ pub fn register_core_tools(
     registry: &mut ToolRegistry,
     config: &ToolsConfig,
 ) {
+    let pm = Arc::new(ProcessManager::new(config.exec_yield_ms));
+
     registry.register(Box::new(read_file::ReadFileTool));
     registry.register(Box::new(write_file::WriteFileTool));
     registry.register(Box::new(list_files::ListFilesTool));
     registry.register(Box::new(exec::ExecTool::new(
         config.exec_allowlist.clone(),
         config.exec_timeout_secs,
+        Arc::clone(&pm),
     )));
+    registry.register(Box::new(process::ProcessTool::new(Arc::clone(&pm))));
     registry.register(Box::new(http_request::HttpRequestTool::new(
         config.http_allowed_domains.clone(),
     )));
@@ -113,6 +122,13 @@ pub fn register_core_tools(
     registry.register(Box::new(memory_flush::MemoryFlushTool));
     registry.register(Box::new(memory_search::MemorySearchTool));
     registry.register(Box::new(memory_replace::MemoryReplaceTool));
+
+    if config.python.enabled {
+        registry.register(Box::new(run_python::RunPythonTool::new(
+            config.python.clone(),
+            config.http_allowed_domains.clone(),
+        )));
+    }
 }
 
 /// Helper to build a JSON Schema object with given properties.

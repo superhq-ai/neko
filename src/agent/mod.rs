@@ -89,7 +89,7 @@ impl Agent {
             context::build_instructions(&self.config, &self.workspace, &self.skills);
         let tool_defs = self.tools.tool_definitions();
 
-        let max_iterations = 10;
+        let max_iterations = self.config.max_iterations as usize;
         let mut last_usage: Option<llm::Usage>;
         let mut current_prev_id = previous_response_id;
         // Function-call outputs produced by the previous iteration,

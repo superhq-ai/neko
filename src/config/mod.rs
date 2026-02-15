@@ -68,6 +68,8 @@ pub struct AgentConfig {
     pub compaction_threshold: u32,
     #[serde(default = "default_max_history")]
     pub max_history: u32,
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: u32,
     #[serde(default)]
     pub instructions: Option<String>,
 }
@@ -87,6 +89,9 @@ fn default_compaction_threshold() -> u32 {
 fn default_max_history() -> u32 {
     100
 }
+fn default_max_iterations() -> u32 {
+    10
+}
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -104,6 +109,7 @@ impl Default for AgentConfig {
             ],
             compaction_threshold: default_compaction_threshold(),
             max_history: default_max_history(),
+            max_iterations: default_max_iterations(),
             instructions: None,
         }
     }
@@ -142,10 +148,18 @@ pub struct ToolsConfig {
     pub http_allowed_domains: Vec<String>,
     #[serde(default = "default_exec_timeout")]
     pub exec_timeout_secs: u64,
+    #[serde(default = "default_exec_yield_ms")]
+    pub exec_yield_ms: u64,
+    #[serde(default)]
+    pub python: PythonConfig,
 }
 
 fn default_exec_timeout() -> u64 {
-    30
+    1800
+}
+
+fn default_exec_yield_ms() -> u64 {
+    10_000
 }
 
 impl Default for ToolsConfig {
@@ -155,6 +169,50 @@ impl Default for ToolsConfig {
             exec_allowlist: vec![],
             http_allowed_domains: vec![],
             exec_timeout_secs: default_exec_timeout(),
+            exec_yield_ms: default_exec_yield_ms(),
+            python: PythonConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PythonConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_python_timeout")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_python_max_memory")]
+    pub max_memory: usize,
+    #[serde(default = "default_python_max_allocations")]
+    pub max_allocations: usize,
+    #[serde(default = "default_python_max_recursion")]
+    pub max_recursion: usize,
+    #[serde(default)]
+    pub external_functions: Vec<String>,
+}
+
+fn default_python_timeout() -> u64 {
+    10
+}
+fn default_python_max_memory() -> usize {
+    16 * 1024 * 1024 // 16 MB
+}
+fn default_python_max_allocations() -> usize {
+    100_000
+}
+fn default_python_max_recursion() -> usize {
+    100
+}
+
+impl Default for PythonConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout_secs: default_python_timeout(),
+            max_memory: default_python_max_memory(),
+            max_allocations: default_python_max_allocations(),
+            max_recursion: default_python_max_recursion(),
+            external_functions: vec![],
         }
     }
 }
@@ -295,7 +353,8 @@ models = ["gpt-5-mini", "gpt-5"]
 
 [tools]
 sandbox = false
-exec_timeout_secs = 30
+exec_timeout_secs = 1800
+exec_yield_ms = 10000
 
 [heartbeat]
 enabled = false
