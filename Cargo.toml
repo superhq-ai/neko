@@ -37,6 +37,9 @@ async-trait = "0.1"
 # MCP (Model Context Protocol)
 rmcp = { version = "0.15", features = ["client", "transport-child-process"] }
 
+# Telegram
+teloxide = { version = "0.13", features = ["macros"] }
+
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.11", features = ["v4"] }

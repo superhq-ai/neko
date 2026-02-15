@@ -6,3 +6,6 @@ pub mod tools;
 pub mod agent;
 pub mod skills;
 pub mod mcp;
+pub mod session;
+pub mod channels;
+pub mod gateway;

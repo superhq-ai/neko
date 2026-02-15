@@ -17,6 +17,8 @@ pub struct Config {
     #[serde(default)]
     pub channels: ChannelsConfig,
     #[serde(default)]
+    pub session: SessionConfig,
+    #[serde(default)]
     pub tools: ToolsConfig,
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
@@ -182,6 +184,64 @@ impl Default for HeartbeatConfig {
             notify_channels: vec![],
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Session config
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionConfig {
+    #[serde(default)]
+    pub dm_scope: DmScope,
+    #[serde(default)]
+    pub reset_mode: ResetMode,
+    #[serde(default = "default_reset_at_hour")]
+    pub reset_at_hour: u32,
+    #[serde(default)]
+    pub idle_minutes: Option<u32>,
+    #[serde(default = "default_max_history")]
+    pub max_history: u32,
+    #[serde(default = "default_max_cached")]
+    pub max_cached: usize,
+}
+
+fn default_reset_at_hour() -> u32 {
+    4
+}
+
+fn default_max_cached() -> usize {
+    8
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            dm_scope: DmScope::default(),
+            reset_mode: ResetMode::default(),
+            reset_at_hour: default_reset_at_hour(),
+            idle_minutes: None,
+            max_history: default_max_history(),
+            max_cached: default_max_cached(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DmScope {
+    #[default]
+    Main,
+    PerChannelPeer,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetMode {
+    #[default]
+    Daily,
+    Idle,
+    Both,
 }
 
 /// MCP server configuration (stdio transport).

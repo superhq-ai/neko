@@ -20,6 +20,9 @@ pub enum NekoError {
     #[error("Agent error: {0}")]
     Agent(String),
 
+    #[error("Channel error: {0}")]
+    Channel(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

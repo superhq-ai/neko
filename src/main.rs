@@ -2,10 +2,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+use neko::channels::Channel;
 use neko::config::Config;
 use neko::error::{NekoError, Result};
 
@@ -145,8 +146,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             }
         },
         Commands::Sessions { action } => match action {
-            SessionAction::List => cmd_sessions_list(&cli.config)?,
-            SessionAction::Clear => cmd_sessions_clear(&cli.config)?,
+            SessionAction::List => cmd_sessions_list(&cli.config).await?,
+            SessionAction::Clear => cmd_sessions_clear(&cli.config).await?,
         },
         Commands::Memory { action } => match action {
             MemoryAction::List => cmd_memory_list(&cli.config)?,
@@ -268,7 +269,7 @@ async fn build_agent_from_config(config: &Config) -> Result<neko::agent::Agent> 
     let skills = neko::skills::load_skills(&workspace)?;
 
     let mut registry = neko::tools::ToolRegistry::new();
-    neko::tools::register_core_tools(&mut registry, &config.tools, &workspace);
+    neko::tools::register_core_tools(&mut registry, &config.tools);
 
     let mcp_clients = neko::mcp::connect_all(&config.mcp).await?;
     for client in &mcp_clients {
@@ -520,10 +521,70 @@ async fn cmd_start(config_path: &Option<PathBuf>) -> Result<()> {
     let api_token = config.gateway.api_token.clone();
     let workspace = config.workspace_path();
 
-    let agent = build_agent_from_config(&config).await?;
+    // Ensure sessions directory exists
+    let sessions_dir = workspace.join("sessions");
+    let _ = std::fs::create_dir_all(&sessions_dir);
 
+    // Build agent
+    let agent = Arc::new(build_agent_from_config(&config).await?);
+
+    // Build session store
+    let session_store = Arc::new(neko::session::SessionStore::new(
+        sessions_dir,
+        config.session.clone(),
+    ));
+    session_store.load_from_disk().await?;
+
+    // Build gateway
+    let config_arc = Arc::new(config.clone());
+    let gateway = Arc::new(neko::gateway::Gateway::new(
+        agent,
+        session_store.clone(),
+        config_arc.clone(),
+    ));
+
+    // Start Telegram channel if configured
+    if let Some(ref tg_config) = config.channels.telegram {
+        if tg_config.enabled {
+            let tg_channel = neko::channels::telegram::TelegramChannel::new(tg_config.clone())?;
+            let (inbound_tx, mut inbound_rx) = mpsc::channel::<neko::channels::InboundMessage>(64);
+            let (outbound_tx, outbound_rx) = mpsc::channel::<neko::channels::OutboundMessage>(64);
+
+            // Spawn Telegram polling loop
+            tokio::spawn(async move {
+                if let Err(e) = tg_channel.start(inbound_tx, outbound_rx).await {
+                    tracing::error!("Telegram channel error: {e}");
+                }
+            });
+
+            // Spawn message handler: inbound → gateway → outbound
+            let gw = gateway.clone();
+            tokio::spawn(async move {
+                while let Some(inbound) = inbound_rx.recv().await {
+                    let gw = gw.clone();
+                    let tx = outbound_tx.clone();
+                    tokio::spawn(async move {
+                        match gw.handle_message(inbound).await {
+                            Ok(outbound) => {
+                                if let Err(e) = tx.send(outbound).await {
+                                    tracing::error!("Failed to send outbound: {e}");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Gateway error: {e}");
+                            }
+                        }
+                    });
+                }
+            });
+
+            info!("Telegram channel started");
+        }
+    }
+
+    // Build HTTP server
     let state = Arc::new(neko::api::AppState {
-        agent: Mutex::new(agent),
+        gateway,
         api_token,
     });
 
@@ -553,6 +614,9 @@ async fn cmd_start(config_path: &Option<PathBuf>) -> Result<()> {
     );
     println!("  PID:       {pid}");
     println!("  Log:       {}", log_file_path().display());
+    if config.channels.telegram.as_ref().map_or(false, |t| t.enabled) {
+        println!("  Telegram:  enabled");
+    }
     println!();
     println!("Press Ctrl+C to stop.");
 
@@ -671,7 +735,7 @@ fn cmd_logs(num_lines: usize) -> Result<()> {
 
 async fn cmd_message(config_path: &Option<PathBuf>, text: &str) -> Result<()> {
     let config = load_config(config_path)?;
-    let mut agent = build_agent_from_config(&config).await?;
+    let agent = build_agent_from_config(&config).await?;
     let response = agent.run_turn(text).await?;
     println!("{response}");
     Ok(())
@@ -755,7 +819,7 @@ fn cmd_memory_search(config_path: &Option<PathBuf>, query: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_sessions_list(config_path: &Option<PathBuf>) -> Result<()> {
+async fn cmd_sessions_list(config_path: &Option<PathBuf>) -> Result<()> {
     let config = load_config(config_path)?;
     let sessions_dir = config.workspace_path().join("sessions");
 
@@ -764,33 +828,35 @@ fn cmd_sessions_list(config_path: &Option<PathBuf>) -> Result<()> {
         return Ok(());
     }
 
-    let mut entries: Vec<_> = std::fs::read_dir(&sessions_dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map_or(false, |ext| ext == "jsonl")
-        })
-        .collect();
+    let store = neko::session::SessionStore::new(sessions_dir, config.session.clone());
+    store.load_from_disk().await?;
 
-    if entries.is_empty() {
+    let metas = store.list().await;
+    if metas.is_empty() {
         println!("No active sessions.");
         return Ok(());
     }
 
-    entries.sort_by_key(|e| e.file_name());
-
-    for entry in entries {
-        let path = entry.path();
-        let name = path.file_stem().unwrap_or_default().to_string_lossy();
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        println!("{name}\t{size} bytes");
+    for meta in metas {
+        let channel = meta.channel.as_deref().unwrap_or("-");
+        let name = meta.display_name.as_deref().unwrap_or("-");
+        println!(
+            "{}\t{}\tturns={}\ttokens={}/{}\tchannel={}\tname={}\tupdated={}",
+            meta.key,
+            &meta.session_id[..8],
+            meta.turn_count,
+            meta.input_tokens,
+            meta.output_tokens,
+            channel,
+            name,
+            meta.updated_at.format("%Y-%m-%d %H:%M"),
+        );
     }
 
     Ok(())
 }
 
-fn cmd_sessions_clear(config_path: &Option<PathBuf>) -> Result<()> {
+async fn cmd_sessions_clear(config_path: &Option<PathBuf>) -> Result<()> {
     let config = load_config(config_path)?;
     let sessions_dir = config.workspace_path().join("sessions");
 
@@ -799,16 +865,11 @@ fn cmd_sessions_clear(config_path: &Option<PathBuf>) -> Result<()> {
         return Ok(());
     }
 
-    let mut count = 0;
-    for entry in std::fs::read_dir(&sessions_dir)? {
-        let entry = entry?;
-        if entry.path().extension().map_or(false, |e| e == "jsonl") {
-            std::fs::remove_file(entry.path())?;
-            count += 1;
-        }
-    }
+    let store = neko::session::SessionStore::new(sessions_dir, config.session.clone());
+    store.load_from_disk().await?;
+    store.clear_all().await?;
 
-    println!("Cleared {count} session(s).");
+    println!("All sessions cleared.");
     Ok(())
 }
 

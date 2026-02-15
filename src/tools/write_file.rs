@@ -1,20 +1,10 @@
-use std::path::PathBuf;
-
 use async_trait::async_trait;
 use serde_json::json;
 
 use super::{schema_object, Tool, ToolContext, ToolResult};
 use crate::error::Result;
 
-pub struct WriteFileTool {
-    workspace: PathBuf,
-}
-
-impl WriteFileTool {
-    pub fn new(workspace: PathBuf) -> Self {
-        Self { workspace }
-    }
-}
+pub struct WriteFileTool;
 
 #[async_trait]
 impl Tool for WriteFileTool {
@@ -23,7 +13,7 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file. Creates parent directories if needed. Path is relative to workspace."
+        "Write content to a file. Creates parent directories if needed. Path is relative to current directory."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -31,7 +21,7 @@ impl Tool for WriteFileTool {
             json!({
                 "path": {
                     "type": "string",
-                    "description": "File path relative to workspace"
+                    "description": "File path relative to current directory"
                 },
                 "content": {
                     "type": "string",
@@ -42,11 +32,12 @@ impl Tool for WriteFileTool {
         )
     }
 
-    async fn execute(&self, params: serde_json::Value, _ctx: &ToolContext) -> Result<ToolResult> {
+    async fn execute(&self, params: serde_json::Value, ctx: &ToolContext) -> Result<ToolResult> {
         let path = params["path"].as_str().unwrap_or_default();
         let content = params["content"].as_str().unwrap_or_default();
 
-        let full_path = self.workspace.join(path);
+        let cwd = ctx.cwd.lock().unwrap().clone();
+        let full_path = cwd.join(path);
 
         // Security: use parent check since file may not exist yet
         if let Some(parent) = full_path.parent() {
@@ -56,7 +47,7 @@ impl Tool for WriteFileTool {
 
             // Verify parent is within workspace
             if let (Ok(parent_canonical), Ok(workspace_canonical)) =
-                (parent.canonicalize(), self.workspace.canonicalize())
+                (parent.canonicalize(), ctx.workspace.canonicalize())
             {
                 if !parent_canonical.starts_with(&workspace_canonical) {
                     return Ok(ToolResult::error("Path is outside workspace boundary"));

@@ -5,10 +5,12 @@ pub mod exec;
 pub mod http_request;
 pub mod memory_flush;
 pub mod memory_search;
+pub mod cd;
 pub mod memory_replace;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -19,7 +21,11 @@ use crate::llm::types::ToolDefinition;
 
 /// Context passed to tool execution.
 pub struct ToolContext {
+    /// Root workspace directory — security boundary (immutable).
     pub workspace: PathBuf,
+    /// Current working directory — mutable, shared across tool calls.
+    /// Relative paths in file/exec tools resolve against this.
+    pub cwd: Arc<Mutex<PathBuf>>,
 }
 
 /// Result of a tool execution
@@ -92,19 +98,18 @@ impl ToolRegistry {
 pub fn register_core_tools(
     registry: &mut ToolRegistry,
     config: &ToolsConfig,
-    workspace: &PathBuf,
 ) {
-    registry.register(Box::new(read_file::ReadFileTool::new(workspace.clone())));
-    registry.register(Box::new(write_file::WriteFileTool::new(workspace.clone())));
-    registry.register(Box::new(list_files::ListFilesTool::new(workspace.clone())));
+    registry.register(Box::new(read_file::ReadFileTool));
+    registry.register(Box::new(write_file::WriteFileTool));
+    registry.register(Box::new(list_files::ListFilesTool));
     registry.register(Box::new(exec::ExecTool::new(
         config.exec_allowlist.clone(),
         config.exec_timeout_secs,
-        workspace.clone(),
     )));
     registry.register(Box::new(http_request::HttpRequestTool::new(
         config.http_allowed_domains.clone(),
     )));
+    registry.register(Box::new(cd::CdTool));
     registry.register(Box::new(memory_flush::MemoryFlushTool));
     registry.register(Box::new(memory_search::MemorySearchTool));
     registry.register(Box::new(memory_replace::MemoryReplaceTool));

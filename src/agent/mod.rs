@@ -2,6 +2,7 @@ pub mod context;
 pub mod loop_runner;
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use tracing::{debug, info, warn};
 
@@ -11,11 +12,20 @@ use crate::llm;
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::skills::Skill;
 
+/// Return value from a completed agent turn.
+pub struct TurnResult {
+    pub text: String,
+    pub history: Vec<llm::Item>,
+    pub usage: Option<llm::Usage>,
+    /// The last response ID — pass back on the next turn for seamless
+    /// reasoning-item chaining via `previous_response_id`.
+    pub last_response_id: Option<String>,
+}
+
 pub struct Agent {
     llm_client: llm::Client,
     tools: ToolRegistry,
     config: AgentConfig,
-    history: Vec<llm::Item>,
     workspace: PathBuf,
     skills: Vec<Skill>,
 }
@@ -30,7 +40,6 @@ impl Agent {
             llm_client,
             tools,
             config,
-            history: Vec::new(),
             workspace: PathBuf::new(),
             skills: Vec::new(),
         }
@@ -46,25 +55,70 @@ impl Agent {
         self
     }
 
-    /// Run a single turn: user message in, assistant response out.
-    /// Handles the tool-use loop internally.
-    pub async fn run_turn(&mut self, user_message: &str) -> Result<String> {
-        self.history.push(llm::Item::Message {
+    /// Backward-compatible single-shot turn (no session, ephemeral history).
+    /// Used by `neko message`.
+    pub async fn run_turn(&self, user_message: &str) -> Result<String> {
+        let result = self
+            .run_turn_with_history(Vec::new(), user_message, None)
+            .await?;
+        Ok(result.text)
+    }
+
+    /// Run a single turn with externally-managed history.
+    ///
+    /// `previous_response_id` enables the API to automatically chain reasoning
+    /// items from the prior response — no manual pass-through needed. When
+    /// present, only the new user message is sent as input (iteration 0);
+    /// follow-up tool-call iterations send only their function_call_outputs.
+    ///
+    /// When `previous_response_id` is `None` (first message or after restart),
+    /// the full history is sent as input and the model re-reasons from scratch.
+    pub async fn run_turn_with_history(
+        &self,
+        mut history: Vec<llm::Item>,
+        user_message: &str,
+        previous_response_id: Option<String>,
+    ) -> Result<TurnResult> {
+        let user_item = llm::Item::Message {
             role: llm::Role::User,
             content: user_message.to_string(),
-        });
+        };
+        history.push(user_item.clone());
 
-
-        let instructions = context::build_instructions(&self.config, &self.workspace, &self.skills);
+        let instructions =
+            context::build_instructions(&self.config, &self.workspace, &self.skills);
         let tool_defs = self.tools.tool_definitions();
 
         let max_iterations = 10;
+        let mut last_usage: Option<llm::Usage>;
+        let mut current_prev_id = previous_response_id;
+        // Function-call outputs produced by the previous iteration,
+        // sent as the sole input when chaining via previous_response_id.
+        let mut pending_fc_outputs: Vec<llm::Item> = Vec::new();
+
+        // Shared cwd — persists across iterations within a turn.
+        let cwd = Arc::new(Mutex::new(self.workspace.clone()));
+
         for iteration in 0..max_iterations {
             debug!("Agent loop iteration {iteration}");
 
+            // Build input:
+            //   iteration 0 + has prev_id  → just the new user message
+            //   iteration 0 + no prev_id   → full history (fallback)
+            //   iteration N (tool follow-up)→ only the new function_call_outputs
+            let input = if iteration == 0 {
+                if current_prev_id.is_some() {
+                    llm::Input::Items(vec![user_item.clone()])
+                } else {
+                    llm::Input::Items(history.clone())
+                }
+            } else {
+                llm::Input::Items(std::mem::take(&mut pending_fc_outputs))
+            };
+
             let request = llm::Request {
                 model: self.config.model.clone(),
-                input: llm::Input::Items(self.history.clone()),
+                input,
                 instructions: Some(instructions.clone()),
                 tools: if tool_defs.is_empty() {
                     None
@@ -75,7 +129,7 @@ impl Agent {
                 stream: false,
                 temperature: None,
                 max_output_tokens: Some(self.config.max_tokens),
-                previous_response_id: None,
+                previous_response_id: current_prev_id.clone(),
             };
 
             let response = self.llm_client.create_response(&request).await?;
@@ -88,24 +142,38 @@ impl Agent {
                 return Err(NekoError::Llm(err_msg));
             }
 
+            // Chain subsequent requests through this response.
+            current_prev_id = Some(response.id.clone());
+            last_usage = response.usage.clone();
+
             let function_calls = response.function_calls();
 
             if function_calls.is_empty() {
                 let text = response.text();
-                self.append_output_to_history(&response.output);
-                self.trim_history();
+                // Append simplified output for the persistent transcript —
+                // reasoning items are NOT included; the API handles them via
+                // previous_response_id on the next turn.
+                append_output_to_history(&mut history, &response.output);
+                strip_reasoning(&mut history);
+                trim_history(&mut history, self.config.max_history as usize);
                 self.log_to_recall(user_message, &text);
-                return Ok(text);
+                return Ok(TurnResult {
+                    text,
+                    history,
+                    usage: last_usage,
+                    last_response_id: current_prev_id,
+                });
             }
 
             info!("Executing {} tool call(s)", function_calls.len());
-            self.append_output_to_history(&response.output);
+            // Record function calls in persistent history (no reasoning).
+            append_output_to_history(&mut history, &response.output);
 
             let tool_ctx = ToolContext {
                 workspace: self.workspace.clone(),
+                cwd: Arc::clone(&cwd),
             };
 
-            // Re-extract function calls from history since we moved them
             let calls: Vec<(String, String, String)> = function_calls
                 .into_iter()
                 .map(|(id, name, args)| (id.to_string(), name.to_string(), args.to_string()))
@@ -133,10 +201,12 @@ impl Agent {
 
                 debug!("Tool {name} returned {} bytes", output.len());
 
-                self.history.push(llm::Item::FunctionCallOutput {
+                let fc_output = llm::Item::FunctionCallOutput {
                     call_id,
                     output,
-                });
+                };
+                history.push(fc_output.clone());
+                pending_fc_outputs.push(fc_output);
             }
         }
 
@@ -190,54 +260,61 @@ impl Agent {
             }
         }
     }
+}
 
-    fn append_output_to_history(&mut self, output: &[llm::OutputItem]) {
-        for item in output {
-            match item {
-                llm::OutputItem::FunctionCall {
-                    id,
-                    call_id,
-                    name,
-                    arguments,
-                } => {
-                    self.history.push(llm::Item::FunctionCall {
-                        id: id.clone(),
-                        call_id: call_id.clone(),
-                        name: name.clone(),
-                        arguments: arguments.clone(),
+/// Convert OutputItems to simplified history Items for the persistent transcript.
+/// Reasoning and Other items are skipped — the API handles them via
+/// `previous_response_id`.
+pub fn append_output_to_history(history: &mut Vec<llm::Item>, output: &[llm::OutputItem]) {
+    for item in output {
+        match item {
+            llm::OutputItem::FunctionCall {
+                id,
+                call_id,
+                name,
+                arguments,
+            } => {
+                history.push(llm::Item::FunctionCall {
+                    id: id.clone(),
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                });
+            }
+            llm::OutputItem::Message { role, content, .. } => {
+                let text: String = content
+                    .iter()
+                    .filter_map(|p| match p {
+                        llm::ContentPart::OutputText { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !text.is_empty() {
+                    history.push(llm::Item::Message {
+                        role: *role,
+                        content: text,
                     });
                 }
-                llm::OutputItem::Message { role, content, .. } => {
-                    let text: String = content
-                        .iter()
-                        .filter_map(|p| match p {
-                            llm::ContentPart::OutputText { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
-                    if !text.is_empty() {
-                        self.history.push(llm::Item::Message {
-                            role: *role,
-                            content: text,
-                        });
-                    }
-                }
-                llm::OutputItem::Reasoning(value) => {
-                    self.history.push(llm::Item::Reasoning(value.clone()));
-                }
-                llm::OutputItem::Other(value) => {
-                    self.history.push(llm::Item::Other(value.clone()));
-                }
             }
+            // Reasoning and Other are handled by previous_response_id;
+            // skip them in the persistent transcript.
+            llm::OutputItem::Reasoning(_) | llm::OutputItem::Other(_) => {}
         }
     }
+}
 
-    fn trim_history(&mut self) {
-        let max = self.config.max_history as usize;
-        if self.history.len() > max {
-            let excess = self.history.len() - max;
-            self.history.drain(0..excess);
-        }
+/// Trim history to at most `max` items, dropping oldest first.
+pub fn trim_history(history: &mut Vec<llm::Item>, max: usize) {
+    if history.len() > max {
+        let excess = history.len() - max;
+        history.drain(0..excess);
     }
+}
+
+/// Remove any stray Reasoning/Other items from history.
+/// Defensive — `append_output_to_history` already skips them, but this
+/// catches items loaded from older transcripts.
+pub fn strip_reasoning(history: &mut Vec<llm::Item>) {
+    history.retain(|item| !matches!(item, llm::Item::Reasoning(_) | llm::Item::Other(_)));
 }

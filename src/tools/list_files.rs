@@ -1,20 +1,10 @@
-use std::path::PathBuf;
-
 use async_trait::async_trait;
 use serde_json::json;
 
 use super::{schema_object, Tool, ToolContext, ToolResult};
 use crate::error::Result;
 
-pub struct ListFilesTool {
-    workspace: PathBuf,
-}
-
-impl ListFilesTool {
-    pub fn new(workspace: PathBuf) -> Self {
-        Self { workspace }
-    }
-}
+pub struct ListFilesTool;
 
 #[async_trait]
 impl Tool for ListFilesTool {
@@ -23,7 +13,7 @@ impl Tool for ListFilesTool {
     }
 
     fn description(&self) -> &str {
-        "List files and directories at the given path. Path is relative to workspace."
+        "List files and directories at the given path. Path is relative to current directory."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -31,23 +21,24 @@ impl Tool for ListFilesTool {
             json!({
                 "path": {
                     "type": "string",
-                    "description": "Directory path relative to workspace (default: root)"
+                    "description": "Directory path relative to current directory (default: current directory)"
                 }
             }),
             &[],
         )
     }
 
-    async fn execute(&self, params: serde_json::Value, _ctx: &ToolContext) -> Result<ToolResult> {
+    async fn execute(&self, params: serde_json::Value, ctx: &ToolContext) -> Result<ToolResult> {
         let path = params["path"].as_str().unwrap_or(".");
-        let full_path = self.workspace.join(path);
+        let cwd = ctx.cwd.lock().unwrap().clone();
+        let full_path = cwd.join(path);
 
         let canonical = match full_path.canonicalize() {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(format!("Cannot resolve path: {e}"))),
         };
 
-        let workspace_canonical = match self.workspace.canonicalize() {
+        let workspace_canonical = match ctx.workspace.canonicalize() {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::error(format!("Cannot resolve workspace: {e}"))),
         };
