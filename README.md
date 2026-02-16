@@ -1,4 +1,5 @@
 # neko
+<img width="1536" height="1024" alt="ChatGPT Image Feb 16, 2026, 01_17_27 PM (1)" src="https://github.com/user-attachments/assets/340d14d7-1674-47ca-805b-fe33e87eb04f" />
 
 Lightweight AI agent runtime targeting Raspberry Pi Zero 2W and low-end VPS. File-based memory, MCP tool support, Telegram integration — all in a single binary.
 
