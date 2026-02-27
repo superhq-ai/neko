@@ -38,7 +38,11 @@ detect_platform() {
     if [ -n "${NEKO_TARGET:-}" ]; then
         TARGET="$NEKO_TARGET"
     elif [ "$OS" = "linux" ]; then
-        TARGET="${ARCH}-unknown-linux-gnu"
+        if ldd --version 2>&1 | grep -qi musl; then
+            TARGET="${ARCH}-unknown-linux-musl"
+        else
+            TARGET="${ARCH}-unknown-linux-gnu"
+        fi
     elif [ "$OS" = "darwin" ]; then
         TARGET="${ARCH}-apple-darwin"
     fi
